@@ -34,10 +34,11 @@ class VariationalVenue(VenueConnector):
                     for symbol in symbols:
                         if ticker == symbol:
                             if funding_rate is not None:
-                                # funding_rate is already decimal (0.0001 = 0.01%)
-                                # Normalize to 8h rate based on funding interval
-                                rate = float(funding_rate)
-                                normalized_8h = rate * (28800 / funding_interval)
+                                # funding_rate is a PERCENTAGE (0.056925 = 0.056925% per interval)
+                                # Convert to decimal by dividing by 100
+                                # Then normalize to 8h rate based on funding interval
+                                rate_decimal = float(funding_rate) / 1000.0
+                                normalized_8h = rate_decimal * (28800 / funding_interval)
                                 result[symbol] = normalized_8h
                             break
 
