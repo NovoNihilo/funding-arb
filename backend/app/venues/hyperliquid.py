@@ -35,7 +35,9 @@ class HyperliquidVenue(VenueConnector):
                             ctx = asset_ctxs[idx]
                             funding = ctx.get("funding")
                             if funding is not None:
-                                result[symbol] = float(funding)
+                                # Hyperliquid returns funding per tick (3 ticks/hour)
+                                # Multiply by 24 to get 8h rate (3 ticks * 8 hours)
+                                result[symbol] = float(funding) * 24
 
         except Exception as e:
             print(f"[hyperliquid] fetch error: {e}")
