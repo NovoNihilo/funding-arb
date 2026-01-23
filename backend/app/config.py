@@ -7,7 +7,15 @@ load_dotenv()
 class Settings:
     def __init__(self):
         self.enabled_venues = self._csv("ENABLED_VENUES", "mock")
-        self.symbols = self._csv("SYMBOLS", "BTC,ETH")
+        
+        # Symbols: use env var if set, otherwise use symbols_config
+        env_symbols = os.getenv("SYMBOLS", "")
+        if env_symbols.strip():
+            self.symbols = self._csv("SYMBOLS", "BTC,ETH")
+        else:
+            from app.symbols_config import get_all_symbols
+            self.symbols = get_all_symbols()
+        
         self.fee_buffer = float(os.getenv("FEE_BUFFER", "0.0001"))
         self.min_net_spread = float(os.getenv("MIN_NET_SPREAD", "0.0003"))
         self.cooldown_seconds = int(os.getenv("COOLDOWN_SECONDS", "1800"))

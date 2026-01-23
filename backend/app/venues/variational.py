@@ -6,10 +6,14 @@ class VariationalVenue(VenueConnector):
     """
     Variational (Omni) perpetual funding rates.
     
-    IMPORTANT: Variational returns funding_rate as a PERCENTAGE per interval.
-    e.g., 0.045 means 4.5% per interval, NOT 0.045 decimal.
+    API returns funding_rate as a percentage value (0.056925 = 0.056925%).
+    The rate is already normalized - funding_interval_s only affects payment
+    frequency, not the rate magnitude. We just divide by 1000 to get decimal.
+    
+    Examples:
+    - BTC: funding_rate=0.056925, interval=8h → 0.056925/1000 = 0.000057 = 5.7% APR
+    - SAHARA: funding_rate=0.1095, interval=1h → 0.1095/1000 = 0.0001095 = 12% APR
     """
-
     BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io"
 
     @property
@@ -25,22 +29,23 @@ class VariationalVenue(VenueConnector):
                 data = resp.json()
 
                 listings = data.get("listings", [])
-
+                
+                # Build ticker lookup from API response
+                ticker_map = {}
                 for listing in listings:
                     ticker = listing.get("ticker", "").upper()
-                    funding_rate = listing.get("funding_rate")
-                    funding_interval = listing.get("funding_interval_s", 28800)
+                    ticker_map[ticker] = listing
 
-                    for symbol in symbols:
-                        if ticker == symbol:
-                            if funding_rate is not None:
-                                # funding_rate is a PERCENTAGE (0.056925 = 0.056925% per interval)
-                                # Convert to decimal by dividing by 100
-                                # Then normalize to 8h rate based on funding interval
-                                rate_decimal = float(funding_rate) / 1000.0
-                                normalized_8h = rate_decimal * (28800 / funding_interval)
-                                result[symbol] = normalized_8h
-                            break
+                for symbol in symbols:
+                    listing = ticker_map.get(symbol)
+                    if listing:
+                        funding_rate = listing.get("funding_rate")
+                        
+                        if funding_rate is not None:
+                            # funding_rate is percentage (0.056925 = 0.056925%)
+                            # Divide by 1000 to get decimal 8h-equivalent rate
+                            # Do NOT normalize by interval - rate is already comparable
+                            result[symbol] = float(funding_rate) / 1000.0
 
         except Exception as e:
             print(f"[variational] fetch error: {e}", flush=True)

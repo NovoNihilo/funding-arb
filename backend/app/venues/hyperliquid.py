@@ -3,11 +3,18 @@ from app.venues.base import VenueConnector
 
 
 class HyperliquidVenue(VenueConnector):
+    """
+    Hyperliquid perpetual funding rates.
+    Supports 100+ assets - we query dynamically.
+    Funding is per-tick (3 ticks/hour), multiply by 8 for 8h rate.
+    """
     BASE_URL = "https://api.hyperliquid.xyz/info"
 
     @property
     def venue_name(self) -> str:
         return "hyperliquid"
+
+    # No supported_symbols override = accepts all symbols dynamically
 
     async def fetch_funding(self, symbols: list[str]) -> dict[str, float]:
         result = {}
@@ -35,8 +42,7 @@ class HyperliquidVenue(VenueConnector):
                             ctx = asset_ctxs[idx]
                             funding = ctx.get("funding")
                             if funding is not None:
-                                # Hyperliquid returns funding per tick (3 ticks/hour)
-                                # Multiply by 24 to get 8h rate (3 ticks * 8 hours)
+                                # Per-tick rate, multiply by 8 for 8h
                                 result[symbol] = float(funding) * 8
 
         except Exception as e:

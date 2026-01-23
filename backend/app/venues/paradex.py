@@ -5,9 +5,9 @@ from app.venues.base import VenueConnector
 class ParadexVenue(VenueConnector):
     """
     Paradex perpetual funding rates.
-    Docs: https://docs.paradex.trade/api/prod/markets/get-markets-summary
+    Market format: {SYMBOL}-USD-PERP
+    Returns 8h rate directly.
     """
-
     BASE_URL = "https://api.prod.paradex.trade/v1"
 
     @property
@@ -18,7 +18,6 @@ class ParadexVenue(VenueConnector):
         result = {}
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                # Get all markets summary
                 resp = await client.get(
                     f"{self.BASE_URL}/markets/summary",
                     params={"market": "ALL"}
@@ -29,7 +28,6 @@ class ParadexVenue(VenueConnector):
                 markets = data.get("results", [])
 
                 for market in markets:
-                    # Market symbol format: "BTC-USD-PERP"
                     market_symbol = market.get("symbol", "")
                     funding_rate = market.get("funding_rate")
 
