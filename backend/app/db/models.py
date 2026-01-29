@@ -16,7 +16,7 @@ class FundingSnapshot(SQLModel, table=True):
 class AlertState(SQLModel, table=True):
     __tablename__ = "alert_states"
 
-    key: str = Field(primary_key=True)  # format: symbol:short_venue:long_venue:channel
+    key: str = Field(primary_key=True)
     last_triggered_at: datetime
 
 
@@ -25,9 +25,23 @@ class AlertEvent(SQLModel, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     ts: datetime = Field(default_factory=datetime.utcnow, index=True)
-    symbol: str
+    symbol: str = Field(index=True)
     short_venue: str
     long_venue: str
+    short_funding: float
+    long_funding: float
     spread: float
     net_spread: float
     message: str
+
+
+class SpreadHistory(SQLModel, table=True):
+    __tablename__ = "spread_history"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    ts: datetime = Field(default_factory=datetime.utcnow, index=True)
+    symbol: str = Field(index=True)
+    short_venue: str = Field(index=True)
+    long_venue: str = Field(index=True)
+    spread: float
+    net_spread: float

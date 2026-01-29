@@ -5,54 +5,38 @@ from app.venues.base import VenueConnector
 class GRVTVenue(VenueConnector):
     """
     GRVT (Gravity Markets) perpetual funding rates.
-    funding_rate_8h_curr is percentage (0.01 = 0.01%), divide by 100.
+    
+    Important: Different assets have different funding intervals (1h, 4h, 8h).
+    The /v1/instrument endpoint provides funding_interval_hours per asset.
+    
+    Despite the field name 'funding_rate_8h_curr', it returns the rate per interval,
+    not normalized to 8h. We must normalize based on funding_interval_hours.
+    
+    Rate is a percentage (0.01 = 0.01%), divide by 100 then scale to 8h.
     """
     BASE_URL = "https://market-data.grvt.io"
 
     # Map symbols to GRVT instrument names
-    # Format is typically {SYMBOL}_USDT_Perp
     INSTRUMENTS = {
-        # Majors
         "BTC": "BTC_USDT_Perp",
         "ETH": "ETH_USDT_Perp",
         "SOL": "SOL_USDT_Perp",
-        
-        # L2/Infrastructure
         "ARB": "ARB_USDT_Perp",
         "OP": "OP_USDT_Perp",
         "STRK": "STRK_USDT_Perp",
         "ZK": "ZK_USDT_Perp",
-        "LINEA": "LINEA_USDT_Perp",
-        
-        # DeFi
         "LINK": "LINK_USDT_Perp",
         "AAVE": "AAVE_USDT_Perp",
         "CRV": "CRV_USDT_Perp",
         "LDO": "LDO_USDT_Perp",
         "JUP": "JUP_USDT_Perp",
         "PENGU": "PENGU_USDT_Perp",
-        
-        # Alt L1s
         "SUI": "SUI_USDT_Perp",
         "ADA": "ADA_USDT_Perp",
         "XRP": "XRP_USDT_Perp",
-        "XLM": "XLM_USDT_Perp",
-        "HBAR": "HBAR_USDT_Perp",
         "DOGE": "DOGE_USDT_Perp",
-        
-        # Memes & New
         "PUMP": "PUMP_USDT_Perp",
-        "MON": "MON_USDT_Perp",
         "W": "W_USDT_Perp",
-        "WLFI": "WLFI_USDT_Perp",
-        "VINE": "VINE_USDT_Perp",
-        "KPEPE": "KPEPE_USDT_Perp",
-        "KSHIB": "KSHIB_USDT_Perp",
-        "KBONK": "KBONK_USDT_Perp",
-        
-        # Others
-        "BLESS": "BLESS_USDT_Perp",
-        "SAHARA": "SAHARA_USDT_Perp",
         "RESOLV": "RESOLV_USDT_Perp",
     }
 
@@ -76,18 +60,32 @@ class GRVTVenue(VenueConnector):
                         continue
                     
                     try:
-                        resp = await client.post(
+                        # Get funding interval for this instrument
+                        instrument_resp = await client.post(
+                            f"{self.BASE_URL}/full/v1/instrument",
+                            json={"instrument": instrument}
+                        )
+                        instrument_resp.raise_for_status()
+                        instrument_data = instrument_resp.json()
+                        interval_hours = instrument_data.get("result", {}).get("funding_interval_hours", 8)
+                        
+                        # Get current funding rate
+                        ticker_resp = await client.post(
                             f"{self.BASE_URL}/full/v1/ticker",
                             json={"instrument": instrument}
                         )
-                        resp.raise_for_status()
-                        data = resp.json()
+                        ticker_resp.raise_for_status()
+                        ticker_data = ticker_resp.json()
                         
-                        ticker_result = data.get("result", {})
+                        ticker_result = ticker_data.get("result", {})
                         funding_rate = ticker_result.get("funding_rate_8h_curr")
                         
                         if funding_rate is not None:
-                            result[symbol] = float(funding_rate) / 100.0
+                            # funding_rate is percentage per interval (e.g., 0.01 = 0.01%)
+                            # Convert to decimal and normalize to 8h
+                            rate_per_interval = float(funding_rate) / 100.0
+                            rate_8h = rate_per_interval * (8 / interval_hours)
+                            result[symbol] = rate_8h
                             
                     except Exception as e:
                         # Silently skip symbols that don't exist on GRVT
