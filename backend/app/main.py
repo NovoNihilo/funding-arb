@@ -1,4 +1,3 @@
-import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
 from app.config import get_settings
@@ -18,8 +17,10 @@ async def lifespan(app: FastAPI):
         init_db()
         log("[main] DB initialized")
         settings = get_settings()
-        log(f"[main] Settings loaded: venues={settings.enabled_venues}, symbols={settings.symbols}")
-        init_scheduler(settings.fetch_interval_seconds)
+        log(f"[main] Settings loaded: venues={settings.enabled_venues}, symbols count={len(settings.symbols)}")
+        log(f"[main] Thresholds: established={settings.established_min_spread}, emerging={settings.emerging_min_spread}")
+        log(f"[main] Timing: fetch={settings.fetch_interval_seconds}s, leaderboard={settings.leaderboard_interval_seconds}s")
+        init_scheduler(settings.fetch_interval_seconds, settings.leaderboard_interval_seconds)
         log("[main] Scheduler initialized")
     except Exception as e:
         log(f"[main] Startup error: {e}")

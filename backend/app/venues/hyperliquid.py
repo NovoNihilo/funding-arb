@@ -1,22 +1,19 @@
 import httpx
-from app.venues.base import VenueConnector
+from app.venues.base import VenueConnector, FundingData
 
 
 class HyperliquidVenue(VenueConnector):
-    """
-    Hyperliquid perpetual funding rates.
-    Supports 100+ assets - we query dynamically.
-    Funding is per-tick (3 ticks/hour), multiply by 8 for 8h rate.
-    """
     BASE_URL = "https://api.hyperliquid.xyz/info"
 
     @property
     def venue_name(self) -> str:
         return "hyperliquid"
 
-    # No supported_symbols override = accepts all symbols dynamically
-
     async def fetch_funding(self, symbols: list[str]) -> dict[str, float]:
+        data = await self.fetch_funding_with_prices(symbols)
+        return {s: d.funding_rate for s, d in data.items()}
+
+    async def fetch_funding_with_prices(self, symbols: list[str]) -> dict[str, FundingData]:
         result = {}
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -41,9 +38,15 @@ class HyperliquidVenue(VenueConnector):
                         if idx < len(asset_ctxs):
                             ctx = asset_ctxs[idx]
                             funding = ctx.get("funding")
+                            mark_price = ctx.get("markPx")
+                            oracle_price = ctx.get("oraclePx")
+                            
                             if funding is not None:
-                                # Per-tick rate, multiply by 8 for 8h
-                                result[symbol] = float(funding) * 8
+                                result[symbol] = FundingData(
+                                    funding_rate=float(funding) * 8,
+                                    mark_price=float(mark_price) if mark_price else None,
+                                    index_price=float(oracle_price) if oracle_price else None,
+                                )
 
         except Exception as e:
             print(f"[hyperliquid] fetch error: {e}")

@@ -11,6 +11,8 @@ class FundingSnapshot(SQLModel, table=True):
     venue: str = Field(index=True)
     symbol: str = Field(index=True)
     funding_rate: float
+    mark_price: Optional[float] = Field(default=None)
+    index_price: Optional[float] = Field(default=None)
 
 
 class AlertState(SQLModel, table=True):
@@ -45,3 +47,22 @@ class SpreadHistory(SQLModel, table=True):
     long_venue: str = Field(index=True)
     spread: float
     net_spread: float
+    price_spread_pct: Optional[float] = Field(default=None)
+
+
+class EstablishedPosition(SQLModel, table=True):
+    """
+    Tracks opportunities that have reached Established status.
+    Used to detect when they fall below threshold and need exit alerts.
+    """
+    __tablename__ = "established_positions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    key: str = Field(index=True, unique=True)  # symbol:short_venue:long_venue
+    symbol: str = Field(index=True)
+    short_venue: str
+    long_venue: str
+    established_at: datetime = Field(default_factory=datetime.utcnow)
+    last_seen_spread: float
+    is_active: bool = Field(default=True)  # False when exit alert sent
+    exit_alerted_at: Optional[datetime] = Field(default=None)

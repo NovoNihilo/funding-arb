@@ -1,13 +1,8 @@
 import httpx
-from app.venues.base import VenueConnector
+from app.venues.base import VenueConnector, FundingData
 
 
 class ExtendedVenue(VenueConnector):
-    """
-    Extended exchange perpetual funding rates.
-    Market format: {SYMBOL}-USD
-    fundingRate is hourly, multiply by 8 for 8h.
-    """
     BASE_URL = "https://api.starknet.extended.exchange/api/v1"
 
     @property
@@ -15,6 +10,10 @@ class ExtendedVenue(VenueConnector):
         return "extended"
 
     async def fetch_funding(self, symbols: list[str]) -> dict[str, float]:
+        data = await self.fetch_funding_with_prices(symbols)
+        return {s: d.funding_rate for s, d in data.items()}
+
+    async def fetch_funding_with_prices(self, symbols: list[str]) -> dict[str, FundingData]:
         result = {}
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -24,7 +23,6 @@ class ExtendedVenue(VenueConnector):
 
                 markets = data.get("data", [])
                 
-                # Build market lookup
                 market_map = {}
                 for market in markets:
                     name = market.get("name", "")
@@ -35,8 +33,15 @@ class ExtendedVenue(VenueConnector):
                     if market:
                         stats = market.get("marketStats", {})
                         funding_rate = stats.get("fundingRate")
+                        mark_price = stats.get("markPrice")
+                        index_price = stats.get("indexPrice")
+                        
                         if funding_rate is not None:
-                            result[symbol] = float(funding_rate) * 8
+                            result[symbol] = FundingData(
+                                funding_rate=float(funding_rate) * 8,
+                                mark_price=float(mark_price) if mark_price else None,
+                                index_price=float(index_price) if index_price else None,
+                            )
 
         except Exception as e:
             print(f"[extended] fetch error: {e}", flush=True)

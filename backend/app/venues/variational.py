@@ -1,19 +1,8 @@
 import httpx
-from app.venues.base import VenueConnector
+from app.venues.base import VenueConnector, FundingData
 
 
 class VariationalVenue(VenueConnector):
-    """
-    Variational (Omni) perpetual funding rates.
-    
-    API returns funding_rate as a percentage value (0.056925 = 0.056925%).
-    The rate is already normalized - funding_interval_s only affects payment
-    frequency, not the rate magnitude. We just divide by 1000 to get decimal.
-    
-    Examples:
-    - BTC: funding_rate=0.056925, interval=8h → 0.056925/1000 = 0.000057 = 5.7% APR
-    - SAHARA: funding_rate=0.1095, interval=1h → 0.1095/1000 = 0.0001095 = 12% APR
-    """
     BASE_URL = "https://omni-client-api.prod.ap-northeast-1.variational.io"
 
     @property
@@ -21,6 +10,10 @@ class VariationalVenue(VenueConnector):
         return "variational"
 
     async def fetch_funding(self, symbols: list[str]) -> dict[str, float]:
+        data = await self.fetch_funding_with_prices(symbols)
+        return {s: d.funding_rate for s, d in data.items()}
+
+    async def fetch_funding_with_prices(self, symbols: list[str]) -> dict[str, FundingData]:
         result = {}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -30,7 +23,6 @@ class VariationalVenue(VenueConnector):
 
                 listings = data.get("listings", [])
                 
-                # Build ticker lookup from API response
                 ticker_map = {}
                 for listing in listings:
                     ticker = listing.get("ticker", "").upper()
@@ -40,12 +32,14 @@ class VariationalVenue(VenueConnector):
                     listing = ticker_map.get(symbol)
                     if listing:
                         funding_rate = listing.get("funding_rate")
+                        mark_price = listing.get("mark_price")
                         
                         if funding_rate is not None:
-                            # funding_rate is percentage (0.056925 = 0.056925%)
-                            # Divide by 1000 to get decimal 8h-equivalent rate
-                            # Do NOT normalize by interval - rate is already comparable
-                            result[symbol] = float(funding_rate) / 1000.0
+                            result[symbol] = FundingData(
+                                funding_rate=float(funding_rate) / 1000.0,
+                                mark_price=float(mark_price) if mark_price else None,
+                                index_price=None,  # Not available
+                            )
 
         except Exception as e:
             print(f"[variational] fetch error: {e}", flush=True)

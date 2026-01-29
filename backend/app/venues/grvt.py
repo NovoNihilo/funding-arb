@@ -1,22 +1,10 @@
 import httpx
-from app.venues.base import VenueConnector
+from app.venues.base import VenueConnector, FundingData
 
 
 class GRVTVenue(VenueConnector):
-    """
-    GRVT (Gravity Markets) perpetual funding rates.
-    
-    Important: Different assets have different funding intervals (1h, 4h, 8h).
-    The /v1/instrument endpoint provides funding_interval_hours per asset.
-    
-    Despite the field name 'funding_rate_8h_curr', it returns the rate per interval,
-    not normalized to 8h. We must normalize based on funding_interval_hours.
-    
-    Rate is a percentage (0.01 = 0.01%), divide by 100 then scale to 8h.
-    """
     BASE_URL = "https://market-data.grvt.io"
 
-    # Map symbols to GRVT instrument names
     INSTRUMENTS = {
         "BTC": "BTC_USDT_Perp",
         "ETH": "ETH_USDT_Perp",
@@ -49,6 +37,10 @@ class GRVTVenue(VenueConnector):
         return set(self.INSTRUMENTS.keys())
 
     async def fetch_funding(self, symbols: list[str]) -> dict[str, float]:
+        data = await self.fetch_funding_with_prices(symbols)
+        return {s: d.funding_rate for s, d in data.items()}
+
+    async def fetch_funding_with_prices(self, symbols: list[str]) -> dict[str, FundingData]:
         result = {}
         filtered = self.filter_symbols(symbols)
         
@@ -60,7 +52,7 @@ class GRVTVenue(VenueConnector):
                         continue
                     
                     try:
-                        # Get funding interval for this instrument
+                        # Get funding interval
                         instrument_resp = await client.post(
                             f"{self.BASE_URL}/full/v1/instrument",
                             json={"instrument": instrument}
@@ -69,7 +61,7 @@ class GRVTVenue(VenueConnector):
                         instrument_data = instrument_resp.json()
                         interval_hours = instrument_data.get("result", {}).get("funding_interval_hours", 8)
                         
-                        # Get current funding rate
+                        # Get ticker data
                         ticker_resp = await client.post(
                             f"{self.BASE_URL}/full/v1/ticker",
                             json={"instrument": instrument}
@@ -79,16 +71,20 @@ class GRVTVenue(VenueConnector):
                         
                         ticker_result = ticker_data.get("result", {})
                         funding_rate = ticker_result.get("funding_rate_8h_curr")
+                        mark_price = ticker_result.get("mark_price")
+                        index_price = ticker_result.get("index_price")
                         
                         if funding_rate is not None:
-                            # funding_rate is percentage per interval (e.g., 0.01 = 0.01%)
-                            # Convert to decimal and normalize to 8h
                             rate_per_interval = float(funding_rate) / 100.0
                             rate_8h = rate_per_interval * (8 / interval_hours)
-                            result[symbol] = rate_8h
                             
-                    except Exception as e:
-                        # Silently skip symbols that don't exist on GRVT
+                            result[symbol] = FundingData(
+                                funding_rate=rate_8h,
+                                mark_price=float(mark_price) if mark_price else None,
+                                index_price=float(index_price) if index_price else None,
+                            )
+                            
+                    except Exception:
                         continue
 
         except Exception as e:
