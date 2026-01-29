@@ -167,70 +167,20 @@ def get_spread_history(
         return list(session.exec(stmt).all())
 
 
-def get_spread_stats(
-    symbol: str,
-    short_venue: str,
-    long_venue: str,
-    hours: int = 24,
-) -> dict:
-    history = get_spread_history(symbol, short_venue, long_venue, hours)
-    
-    if not history:
-        return None
-    
-    spreads = [h.spread for h in history]
-    current = spreads[-1] if spreads else 0
-    avg = sum(spreads) / len(spreads)
-    min_spread = min(spreads)
-    max_spread = max(spreads)
-    
-    if len(spreads) >= 6:
-        recent_avg = sum(spreads[-3:]) / 3
-        earlier_avg = sum(spreads[-6:-3]) / 3
-        if recent_avg > earlier_avg * 1.05:
-            trend = "widening"
-        elif recent_avg < earlier_avg * 0.95:
-            trend = "narrowing"
-        else:
-            trend = "stable"
-    elif len(spreads) >= 2:
-        if spreads[-1] > spreads[0] * 1.05:
-            trend = "widening"
-        elif spreads[-1] < spreads[0] * 0.95:
-            trend = "narrowing"
-        else:
-            trend = "stable"
-    else:
-        trend = "new"
-    
-    first_seen = history[0].ts
-    duration_hours = (datetime.utcnow() - first_seen).total_seconds() / 3600
-    
-    price_spreads = [h.price_spread_pct for h in history if h.price_spread_pct is not None]
-    price_spread_current = price_spreads[-1] if price_spreads else None
-    price_spread_avg = sum(price_spreads) / len(price_spreads) if price_spreads else None
-    
-    return {
-        "current": current,
-        "avg_24h": avg,
-        "min_24h": min_spread,
-        "max_24h": max_spread,
-        "trend": trend,
-        "duration_hours": duration_hours,
-        "data_points": len(spreads),
-        "price_spread_pct": price_spread_current,
-        "price_spread_avg": price_spread_avg,
-    }
-
-
-def get_continuous_duration(
+def get_continuous_spread_data(
     symbol: str,
     short_venue: str,
     long_venue: str,
     min_net_spread: float,
-    fee_buffer: float = 0.0001,
-) -> float | None:
+) -> tuple[float | None, list[SpreadHistory]]:
+    """
+    Get continuous duration and ONLY the data points from the current continuous period.
+    Returns: (duration_hours, list of history records in the continuous period)
+    
+    If spread ever dropped below min_net_spread, we only return data AFTER that drop.
+    """
     with get_session() as session:
+        # Get all history, newest first
         stmt = (
             select(SpreadHistory)
             .where(
@@ -245,22 +195,30 @@ def get_continuous_duration(
         history = list(session.exec(stmt).all())
         
         if not history:
-            return None
+            return None, []
         
-        current_net = history[0].net_spread
-        if current_net < min_net_spread:
-            return None
+        # Check if current is above threshold
+        if history[0].net_spread < min_net_spread:
+            return None, []
         
-        continuous_start = history[0].ts
+        # Walk backwards to find where continuous period started
+        continuous_records = [history[0]]
         
         for i in range(1, len(history)):
             record = history[i]
             if record.net_spread < min_net_spread:
+                # Found a break - stop here
                 break
-            continuous_start = record.ts
+            continuous_records.append(record)
         
+        # Reverse to get chronological order (oldest first)
+        continuous_records.reverse()
+        
+        # Calculate duration from first record in continuous period
+        continuous_start = continuous_records[0].ts
         duration_hours = (datetime.utcnow() - continuous_start).total_seconds() / 3600
-        return duration_hours
+        
+        return duration_hours, continuous_records
 
 
 def get_extended_spread_stats(
@@ -270,37 +228,25 @@ def get_extended_spread_stats(
     min_net_spread: float,
     fee_buffer: float = 0.0001,
 ) -> dict | None:
-    duration = get_continuous_duration(symbol, short_venue, long_venue, min_net_spread, fee_buffer)
+    """
+    Get spread stats using ONLY data from the current continuous period.
+    Range, avg, etc. are all calculated from when the opportunity started
+    being continuously above threshold.
+    """
+    duration, continuous_history = get_continuous_spread_data(
+        symbol, short_venue, long_venue, min_net_spread
+    )
     
-    if duration is None:
+    if duration is None or not continuous_history:
         return None
     
-    hours_to_check = min(24, max(1, duration))
-    
-    with get_session() as session:
-        cutoff = datetime.utcnow() - timedelta(hours=hours_to_check)
-        stmt = (
-            select(SpreadHistory)
-            .where(
-                and_(
-                    SpreadHistory.symbol == symbol,
-                    SpreadHistory.short_venue == short_venue,
-                    SpreadHistory.long_venue == long_venue,
-                    SpreadHistory.ts >= cutoff,
-                )
-            )
-            .order_by(SpreadHistory.ts.asc())
-        )
-        history = list(session.exec(stmt).all())
-    
-    if not history:
-        return None
-    
-    spreads = [h.net_spread for h in history]
+    # Calculate stats from continuous period only
+    spreads = [h.net_spread for h in continuous_history]
     avg = sum(spreads) / len(spreads)
     min_spread = min(spreads)
     max_spread = max(spreads)
     
+    # Calculate trend from continuous period
     if len(spreads) >= 6:
         recent_avg = sum(spreads[-3:]) / 3
         earlier_avg = sum(spreads[-6:-3]) / 3
@@ -320,7 +266,8 @@ def get_extended_spread_stats(
     else:
         trend = "new"
     
-    price_spreads = [h.price_spread_pct for h in history if h.price_spread_pct is not None]
+    # Price spread stats from continuous period
+    price_spreads = [h.price_spread_pct for h in continuous_history if h.price_spread_pct is not None]
     price_spread_current = price_spreads[-1] if price_spreads else None
     price_spread_avg = sum(price_spreads) / len(price_spreads) if price_spreads else None
     
@@ -336,6 +283,18 @@ def get_extended_spread_stats(
     }
 
 
+# Legacy function - kept for compatibility
+def get_continuous_duration(
+    symbol: str,
+    short_venue: str,
+    long_venue: str,
+    min_net_spread: float,
+    fee_buffer: float = 0.0001,
+) -> float | None:
+    duration, _ = get_continuous_spread_data(symbol, short_venue, long_venue, min_net_spread)
+    return duration
+
+
 # ============ Established Position Tracking ============
 
 def make_position_key(symbol: str, short_venue: str, long_venue: str) -> str:
@@ -349,7 +308,6 @@ def get_established_position(key: str) -> EstablishedPosition | None:
 
 
 def get_all_active_established() -> list[EstablishedPosition]:
-    """Get all positions that are currently marked as active (established and not exited)."""
     with get_session() as session:
         stmt = select(EstablishedPosition).where(EstablishedPosition.is_active == True)
         return list(session.exec(stmt).all())
@@ -361,7 +319,6 @@ def upsert_established_position(
     long_venue: str,
     spread: float,
 ):
-    """Mark a position as established (or update if already exists)."""
     key = make_position_key(symbol, short_venue, long_venue)
     with get_session() as session:
         existing = session.exec(
@@ -371,7 +328,7 @@ def upsert_established_position(
         if existing:
             existing.last_seen_spread = spread
             existing.is_active = True
-            existing.exit_alerted_at = None  # Reset if re-established
+            existing.exit_alerted_at = None
         else:
             position = EstablishedPosition(
                 key=key,
@@ -388,7 +345,6 @@ def upsert_established_position(
 
 
 def mark_position_exited(key: str):
-    """Mark a position as exited (exit alert sent)."""
     with get_session() as session:
         position = session.exec(
             select(EstablishedPosition).where(EstablishedPosition.key == key)
