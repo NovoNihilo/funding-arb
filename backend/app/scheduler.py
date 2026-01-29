@@ -12,7 +12,6 @@ from app.db.repository import (
     upsert_established_position,
     mark_position_exited,
     make_position_key,
-    get_continuous_duration,
 )
 from app.arb_engine import (
     compute_all_arbs,
@@ -29,28 +28,27 @@ def log(msg: str):
     print(msg, flush=True)
 
 
-async def fetch_all_funding_with_prices(connectors, symbols: list[str]) -> tuple[dict, dict]:
+async def fetch_funding_data(connectors, symbols: list[str]) -> tuple[dict, dict, dict]:
+    venue_data = {}
     venue_funding_map = {}
     venue_price_map = {}
     
     for connector in connectors:
         try:
             data = await connector.fetch_funding_with_prices(symbols)
+            venue_data[connector.venue_name] = data
             venue_funding_map[connector.venue_name] = {s: d.funding_rate for s, d in data.items()}
             venue_price_map[connector.venue_name] = {
                 s: d.mark_price for s, d in data.items() if d.mark_price is not None
             }
-            log(f"[fetch] {connector.venue_name}: {len(data)} symbols, {len(venue_price_map[connector.venue_name])} prices")
+            log(f"[fetch] {connector.venue_name}: {len(data)} symbols")
         except Exception as e:
             log(f"[fetch] {connector.venue_name} error: {e}")
     
-    return venue_funding_map, venue_price_map
+    return venue_data, venue_funding_map, venue_price_map
 
 
-def store_snapshots_with_prices(
-    venue_data: dict[str, dict[str, FundingData]],
-    ts: datetime
-):
+def store_snapshots_with_prices(venue_data: dict[str, dict[str, FundingData]], ts: datetime):
     count = 0
     for venue, symbols in venue_data.items():
         for symbol, data in symbols.items():
@@ -63,10 +61,11 @@ def store_snapshots_with_prices(
                 index_price=data.index_price,
             )
             count += 1
-    log(f"[store] {count} snapshots saved (with prices)")
+    log(f"[store] {count} snapshots saved")
 
 
-def store_spread_history_with_prices(opportunities: list, ts: datetime):
+def store_spread_history(opportunities: list, ts: datetime):
+    count = 0
     for opp in opportunities:
         insert_spread_history(
             symbol=opp.symbol,
@@ -77,19 +76,17 @@ def store_spread_history_with_prices(opportunities: list, ts: datetime):
             ts=ts,
             price_spread_pct=opp.price_spread_pct,
         )
-    log(f"[store] {len(opportunities)} spread records saved")
+        count += 1
+    log(f"[store] {count} spread records saved")
 
 
 def classify_opportunities(opportunities: list, settings) -> tuple[dict, dict, set]:
-    """
-    Classify opportunities into established and emerging tiers.
-    Also returns set of currently established position keys.
-    """
     established = {}
     emerging = {}
     established_keys = set()
     
     for opp in opportunities:
+        # Check Established tier (48h+, >= 0.01%)
         stats = get_extended_spread_stats(
             opp.symbol,
             opp.short_venue,
@@ -115,11 +112,9 @@ def classify_opportunities(opportunities: list, settings) -> tuple[dict, dict, s
                     established[opp.symbol] = []
                 established[opp.symbol].append(entry)
                 
-                # Track this as established
                 key = make_position_key(opp.symbol, opp.short_venue, opp.long_venue)
                 established_keys.add(key)
                 
-                # Update/create established position record
                 upsert_established_position(
                     opp.symbol,
                     opp.short_venue,
@@ -128,6 +123,7 @@ def classify_opportunities(opportunities: list, settings) -> tuple[dict, dict, s
                 )
             continue
         
+        # Check Emerging tier (<48h, >= 0.02%)
         stats = get_extended_spread_stats(
             opp.symbol,
             opp.short_venue,
@@ -155,51 +151,34 @@ def classify_opportunities(opportunities: list, settings) -> tuple[dict, dict, s
     return established, emerging, established_keys
 
 
-async def check_exit_alerts(
-    current_established_keys: set,
-    venue_funding_map: dict,
-    settings,
-):
-    """
-    Check for established positions that have fallen below threshold.
-    Send exit alerts for positions that need to be closed.
-    """
-    log("[exit_alerts] Checking for positions to exit...")
-    
-    # Get all positions we previously marked as established
+async def check_exit_alerts(established_keys: set, venue_funding_map: dict, settings):
     active_positions = get_all_active_established()
-    log(f"[exit_alerts] {len(active_positions)} active established positions in DB")
     
+    if not active_positions:
+        return
+    
+    log(f"[exit_alerts] Checking {len(active_positions)} active positions...")
     exit_count = 0
     
     for position in active_positions:
-        key = position.key
-        
-        # If still in current established, skip
-        if key in current_established_keys:
+        if position.key in established_keys:
             continue
         
-        # Position was established but is no longer - check current spread
         symbol = position.symbol
         short_venue = position.short_venue
         long_venue = position.long_venue
         
-        # Get current rates
         short_rate = venue_funding_map.get(short_venue, {}).get(symbol)
         long_rate = venue_funding_map.get(long_venue, {}).get(symbol)
         
         if short_rate is None or long_rate is None:
-            log(f"[exit_alerts] {key}: Missing rate data, skipping")
             continue
         
         current_spread = short_rate - long_rate - settings.fee_buffer
-        
-        # Calculate how long it was active
         duration_hours = (datetime.utcnow() - position.established_at).total_seconds() / 3600
         
-        log(f"[exit_alerts] {key}: Previous spread={position.last_seen_spread:.6f}, Current={current_spread:.6f}")
+        log(f"[exit_alerts] {position.key}: was {position.last_seen_spread:.6f}, now {current_spread:.6f}")
         
-        # Send exit alert
         msg = format_exit_alert(
             symbol=symbol,
             short_venue=short_venue,
@@ -216,8 +195,7 @@ async def check_exit_alerts(
                 msg
             )
             if success:
-                log(f"[exit_alerts] Sent exit alert for {key}")
-                mark_position_exited(key)
+                mark_position_exited(position.key)
                 insert_event(
                     symbol=symbol,
                     short_venue=short_venue,
@@ -227,91 +205,28 @@ async def check_exit_alerts(
                     message=msg,
                 )
                 exit_count += 1
-            else:
-                log(f"[exit_alerts] Failed to send exit alert for {key}")
+                log(f"[exit_alerts] Sent exit alert for {position.key}")
     
-    log(f"[exit_alerts] Sent {exit_count} exit alerts")
-
-
-async def send_leaderboard(settings):
-    log("[leaderboard] Building leaderboard...")
-    
-    connectors = get_enabled_connectors(settings.enabled_venues)
-    if not connectors:
-        log("[leaderboard] No venues enabled")
-        return
-    
-    venue_funding_map, venue_price_map = await fetch_all_funding_with_prices(connectors, settings.symbols)
-    if not venue_funding_map:
-        log("[leaderboard] No funding data")
-        return
-    
-    all_opps = compute_all_arbs(
-        settings.symbols,
-        venue_funding_map,
-        settings.fee_buffer,
-        min_spread=settings.established_min_spread,
-        venue_price_map=venue_price_map,
-    )
-    log(f"[leaderboard] {len(all_opps)} total opportunities found")
-    
-    established, emerging, established_keys = classify_opportunities(all_opps, settings)
-    
-    est_count = sum(len(v) for v in established.values())
-    emg_count = sum(len(v) for v in emerging.values())
-    log(f"[leaderboard] Classified: {est_count} established, {emg_count} emerging")
-    
-    # Check for exit alerts (positions that were established but no longer are)
-    await check_exit_alerts(established_keys, venue_funding_map, settings)
-    
-    msg = format_leaderboard(established, emerging)
-    
-    if settings.telegram_free_channel_id:
-        log("[leaderboard] Sending to free channel...")
-        success = await send_message(settings.telegram_bot_token, settings.telegram_free_channel_id, msg)
-        if success:
-            log("[leaderboard] Sent to free channel SUCCESS")
-            insert_event(
-                symbol="LEADERBOARD",
-                short_venue="",
-                long_venue="",
-                spread=0,
-                net_spread=0,
-                message=msg,
-            )
-        else:
-            log("[leaderboard] Sent to free channel FAILED")
+    if exit_count > 0:
+        log(f"[exit_alerts] Sent {exit_count} exit alerts")
 
 
 async def fetch_job():
-    log("[fetch_job] ========== Starting fetch job ==========")
+    log("[fetch_job] ========== Starting ==========")
     settings = get_settings()
     ts = datetime.utcnow()
 
     connectors = get_enabled_connectors(settings.enabled_venues)
-    log(f"[fetch_job] Loaded {len(connectors)} connectors")
     if not connectors:
-        log("[fetch_job] No venues enabled, skipping")
+        log("[fetch_job] No venues enabled")
         return
 
-    venue_data = {}
-    venue_funding_map = {}
-    venue_price_map = {}
-    
-    for connector in connectors:
-        try:
-            data = await connector.fetch_funding_with_prices(settings.symbols)
-            venue_data[connector.venue_name] = data
-            venue_funding_map[connector.venue_name] = {s: d.funding_rate for s, d in data.items()}
-            venue_price_map[connector.venue_name] = {
-                s: d.mark_price for s, d in data.items() if d.mark_price is not None
-            }
-            log(f"[fetch] {connector.venue_name}: {len(data)} symbols")
-        except Exception as e:
-            log(f"[fetch] {connector.venue_name} error: {e}")
+    venue_data, venue_funding_map, venue_price_map = await fetch_funding_data(
+        connectors, settings.symbols
+    )
     
     if not venue_funding_map:
-        log("[fetch_job] No funding data fetched, skipping")
+        log("[fetch_job] No data fetched")
         return
 
     store_snapshots_with_prices(venue_data, ts)
@@ -323,36 +238,88 @@ async def fetch_job():
         min_spread=0,
         venue_price_map=venue_price_map,
     )
-    log(f"[fetch_job] {len(all_opportunities)} opportunities computed")
-
+    
     valid_opps = [o for o in all_opportunities if o.spread > 0]
-    store_spread_history_with_prices(valid_opps, ts)
+    store_spread_history(valid_opps, ts)
+    log(f"[fetch_job] {len(valid_opps)} opportunities tracked")
 
-    # Check exit alerts on every fetch (real-time alerts)
-    # First, get current established opportunities
-    all_opps_for_classification = compute_all_arbs(
+    # Only check exit alerts if we have established positions
+    active_positions = get_all_active_established()
+    if active_positions:
+        qualifying_opps = compute_all_arbs(
+            settings.symbols,
+            venue_funding_map,
+            settings.fee_buffer,
+            min_spread=settings.established_min_spread,
+            venue_price_map=venue_price_map,
+        )
+        _, _, established_keys = classify_opportunities(qualifying_opps, settings)
+        await check_exit_alerts(established_keys, venue_funding_map, settings)
+
+    log("[fetch_job] ========== Complete ==========")
+
+
+async def leaderboard_job():
+    log("[leaderboard_job] ========== Starting ==========")
+    settings = get_settings()
+
+    connectors = get_enabled_connectors(settings.enabled_venues)
+    if not connectors:
+        log("[leaderboard_job] No venues enabled")
+        return
+
+    venue_data, venue_funding_map, venue_price_map = await fetch_funding_data(
+        connectors, settings.symbols
+    )
+    
+    if not venue_funding_map:
+        log("[leaderboard_job] No data fetched")
+        return
+
+    all_opps = compute_all_arbs(
         settings.symbols,
         venue_funding_map,
         settings.fee_buffer,
         min_spread=settings.established_min_spread,
         venue_price_map=venue_price_map,
     )
-    _, _, established_keys = classify_opportunities(all_opps_for_classification, settings)
+    log(f"[leaderboard_job] {len(all_opps)} opportunities above min threshold")
+
+    established, emerging, established_keys = classify_opportunities(all_opps, settings)
     
+    est_count = sum(len(v) for v in established.values())
+    emg_count = sum(len(v) for v in emerging.values())
+    log(f"[leaderboard_job] Classified: {est_count} established, {emg_count} emerging")
+
+    # Check exit alerts
     await check_exit_alerts(established_keys, venue_funding_map, settings)
 
-    log("[fetch_job] ========== Fetch job complete ==========")
+    msg = format_leaderboard(established, emerging)
+    
+    if settings.telegram_free_channel_id:
+        success = await send_message(
+            settings.telegram_bot_token,
+            settings.telegram_free_channel_id,
+            msg
+        )
+        if success:
+            log("[leaderboard_job] Sent SUCCESS")
+            insert_event(
+                symbol="LEADERBOARD",
+                short_venue="",
+                long_venue="",
+                spread=0,
+                net_spread=0,
+                message=msg,
+            )
+        else:
+            log("[leaderboard_job] Sent FAILED")
 
-
-async def leaderboard_job():
-    log("[leaderboard_job] ========== Starting leaderboard job ==========")
-    settings = get_settings()
-    await send_leaderboard(settings)
-    log("[leaderboard_job] ========== Leaderboard job complete ==========")
+    log("[leaderboard_job] ========== Complete ==========")
 
 
 def init_scheduler(fetch_interval: int, leaderboard_interval: int):
-    log(f"[scheduler] Initializing: fetch={fetch_interval}s, leaderboard={leaderboard_interval}s")
+    log(f"[scheduler] Init: fetch={fetch_interval}s, leaderboard={leaderboard_interval}s")
     
     scheduler.add_job(
         fetch_job,
@@ -371,7 +338,7 @@ def init_scheduler(fetch_interval: int, leaderboard_interval: int):
     )
     
     scheduler.start()
-    log("[scheduler] Started successfully")
+    log("[scheduler] Started")
 
 
 def shutdown_scheduler():

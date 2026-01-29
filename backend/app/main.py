@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Query
 from app.config import get_settings
-from app.scheduler import init_scheduler, shutdown_scheduler
+from app.scheduler import init_scheduler, shutdown_scheduler, leaderboard_job
 from app.db.init_db import init_db
 from app.db.repository import get_latest_funding_by_symbol, get_recent_events
 
@@ -64,3 +64,15 @@ def events_recent(limit: int = Query(default=50, ge=1, le=500)):
             for e in events
         ],
     }
+
+
+@app.post("/leaderboard/send")
+async def send_leaderboard_now():
+    """Manually trigger a leaderboard message."""
+    log("[api] Manual leaderboard trigger requested")
+    try:
+        await leaderboard_job()
+        return {"status": "ok", "message": "Leaderboard sent"}
+    except Exception as e:
+        log(f"[api] Error: {e}")
+        return {"status": "error", "message": str(e)}
