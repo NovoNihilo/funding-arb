@@ -1,10 +1,5 @@
 """
 Scheduler module - handles periodic data fetching and leaderboard generation.
-
-Key optimizations:
-- Job coalescing (skip missed runs instead of queuing)
-- Timeout protection on jobs
-- Error isolation per venue
 """
 import asyncio
 from datetime import datetime
@@ -27,9 +22,13 @@ from app.db.repository import (
 )
 from app.arb_engine import (
     compute_all_arbs,
-    format_leaderboard,
     format_exit_alert,
     LeaderboardEntry,
+)
+from app.telegram_bot import (
+    TelegramBot,
+    build_main_leaderboard_message,
+    get_leaderboard_state,
 )
 from app.telegram_sender import send_message
 
@@ -50,7 +49,6 @@ def job_missed_listener(event):
 
 
 async def fetch_single_venue(connector, symbols: list[str], timeout: int) -> tuple[str, dict]:
-    """Fetch from single venue with timeout protection."""
     venue_name = connector.venue_name
     try:
         data = await asyncio.wait_for(
@@ -67,7 +65,6 @@ async def fetch_single_venue(connector, symbols: list[str], timeout: int) -> tup
 
 
 async def fetch_funding_data(connectors, symbols: list[str], timeout: int) -> tuple[dict, dict, dict]:
-    """Fetch from all venues concurrently with timeout protection."""
     venue_data = {}
     venue_funding_map = {}
     venue_price_map = {}
@@ -294,13 +291,25 @@ async def leaderboard_job():
 
     await check_exit_alerts(established_keys, venue_funding_map, settings)
 
-    msg = format_leaderboard(established, emerging)
-    
+    # Update global state for callback handling
+    state = get_leaderboard_state()
+    state.update(established, emerging, chat_id=settings.telegram_free_channel_id)
+
+    # Build and send interactive message
     if settings.telegram_free_channel_id:
-        success = await send_message(settings.telegram_bot_token, settings.telegram_free_channel_id, msg)
-        if success:
-            log("[leaderboard_job] Telegram send SUCCESS")
-            insert_event(symbol="LEADERBOARD", short_venue="", long_venue="", spread=0, net_spread=0, message=msg)
+        bot = TelegramBot(settings.telegram_bot_token)
+        text, keyboard = build_main_leaderboard_message(established, emerging)
+        
+        result = await bot.send_message(
+            settings.telegram_free_channel_id,
+            text,
+            reply_markup=keyboard,
+        )
+        
+        if result:
+            state.message_id = result.get("message_id")
+            log(f"[leaderboard_job] Telegram send SUCCESS (msg_id={state.message_id})")
+            insert_event(symbol="LEADERBOARD", short_venue="", long_venue="", spread=0, net_spread=0, message=text)
         else:
             log("[leaderboard_job] Telegram send FAILED", level="ERROR")
     else:

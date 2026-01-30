@@ -1,13 +1,14 @@
 """Funding Arbitrage Alert Bot - Main Application"""
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.scheduler import init_scheduler, shutdown_scheduler, leaderboard_job
 from app.db.init_db import init_db
 from app.db.repository import get_latest_funding_by_symbol, get_recent_events
+from app.telegram_bot import TelegramBot, handle_callback, get_leaderboard_state
 
 
 def log(msg: str, level: str = "INFO"):
@@ -30,6 +31,13 @@ async def lifespan(app: FastAPI):
         for warning in settings.validate():
             log(f"CONFIG WARNING: {warning}", level="WARN")
         
+        # Set up webhook if URL is configured
+        webhook_url = settings.telegram_webhook_url
+        if webhook_url and settings.telegram_bot_token:
+            bot = TelegramBot(settings.telegram_bot_token)
+            await bot.set_webhook(f"{webhook_url}/webhook/telegram")
+            log(f"Webhook set: {webhook_url}/webhook/telegram")
+        
         init_scheduler(settings.fetch_interval_seconds, settings.leaderboard_interval_seconds)
         log("========== Startup Complete ==========")
     except Exception as e:
@@ -44,7 +52,7 @@ async def lifespan(app: FastAPI):
     shutdown_scheduler()
 
 
-app = FastAPI(title="Funding Arb Alerts", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Funding Arb Alerts", version="2.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -63,6 +71,7 @@ def get_config():
         "established_min_spread": settings.established_min_spread,
         "emerging_min_spread": settings.emerging_min_spread,
         "telegram_configured": bool(settings.telegram_bot_token and settings.telegram_free_channel_id),
+        "webhook_configured": bool(settings.telegram_webhook_url),
     }
 
 
@@ -98,3 +107,38 @@ async def send_leaderboard_now():
     except Exception as e:
         log(f"[api] Error: {e}", level="ERROR")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/webhook/telegram")
+async def telegram_webhook(request: Request):
+    """
+    Webhook endpoint for Telegram bot updates.
+    Handles inline keyboard button callbacks.
+    """
+    try:
+        update = await request.json()
+        
+        # Handle callback queries (button presses)
+        if "callback_query" in update:
+            settings = get_settings()
+            bot = TelegramBot(settings.telegram_bot_token)
+            await handle_callback(bot, update["callback_query"])
+        
+        return {"ok": True}
+    
+    except Exception as e:
+        log(f"[webhook] Error: {e}", level="ERROR")
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/leaderboard/state")
+def get_state():
+    """Debug endpoint to check current leaderboard state."""
+    state = get_leaderboard_state()
+    return {
+        "last_updated": state.last_updated.isoformat() if state.last_updated else None,
+        "established_symbols": list(state.established.keys()),
+        "emerging_symbols": list(state.emerging.keys()),
+        "message_id": state.message_id,
+        "chat_id": state.chat_id,
+    }

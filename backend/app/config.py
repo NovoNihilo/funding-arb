@@ -37,6 +37,7 @@ class Settings:
         self.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         self.telegram_free_channel_id = os.getenv("TELEGRAM_FREE_CHANNEL_ID", "")
         self.telegram_pro_channel_id = os.getenv("TELEGRAM_PRO_CHANNEL_ID", "")
+        self.telegram_webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL", "")  # e.g., https://your-server.com
         
         # ============ Database ============
         self.database_url = os.getenv("DATABASE_URL", "sqlite:////data/funding_arb.db")
@@ -49,7 +50,6 @@ class Settings:
         return [v.strip() for v in os.getenv(key, default).split(",") if v.strip()]
     
     def validate(self) -> list[str]:
-        """Validate settings and return list of warnings."""
         warnings = []
         if not self.telegram_bot_token:
             warnings.append("TELEGRAM_BOT_TOKEN not set - alerts will not be sent")
@@ -57,6 +57,8 @@ class Settings:
             warnings.append("TELEGRAM_FREE_CHANNEL_ID not set - alerts will not be sent")
         if self.fetch_interval_seconds < 30:
             warnings.append(f"FETCH_INTERVAL_SECONDS={self.fetch_interval_seconds} is very low")
+        if not self.telegram_webhook_url:
+            warnings.append("TELEGRAM_WEBHOOK_URL not set - inline buttons won't work")
         return warnings
 
 

@@ -17,6 +17,30 @@ class ArbOpportunity:
     price_spread_pct: Optional[float] = None
 
 
+def normalize_symbol(symbol: str) -> str:
+    """
+    Normalize symbol names for comparison across venues.
+    Strips HIP-3 dex suffixes: BTC_hyna -> BTC, SOL_flx -> SOL
+    """
+    if "_" in symbol:
+        return symbol.split("_")[0]
+    return symbol
+
+
+def get_venue_display_name(venue: str, original_symbol: str) -> str:
+    """
+    Get the display venue name, appending HIP-3 dex suffix if present.
+    
+    Examples:
+    - ("hyperliquid", "BTC") -> "hyperliquid"
+    - ("hyperliquid", "BTC_hyna") -> "hyperliquid_hyna"
+    """
+    if "_" in original_symbol:
+        dex_suffix = original_symbol.split("_")[1]
+        return f"{venue}_{dex_suffix}"
+    return venue
+
+
 def compute_all_arbs(
     symbols: list[str],
     venue_funding_map: dict[str, dict[str, float]],
@@ -24,119 +48,77 @@ def compute_all_arbs(
     min_spread: float = 0.0,
     venue_price_map: dict[str, dict[str, float]] = None,
 ) -> list[ArbOpportunity]:
+    """
+    Compute ALL arbitrage opportunities across all venue pairs.
+    
+    Handles HIP-3 symbols by normalizing them (e.g., SOL_hyna treated same as SOL).
+    """
     opportunities = []
-    venues = list(venue_funding_map.keys())
-
-    for symbol in symbols:
-        symbol_venues = []
-        for venue in venues:
-            if symbol in venue_funding_map[venue]:
-                symbol_venues.append((venue, venue_funding_map[venue][symbol]))
-
-        if len(symbol_venues) < 2:
+    
+    # Build a map: normalized_symbol -> list of {venue, original_symbol, rate, price}
+    symbol_venue_rates = {}
+    
+    for venue, rates in venue_funding_map.items():
+        for original_symbol, rate in rates.items():
+            normalized = normalize_symbol(original_symbol)
+            display_venue = get_venue_display_name(venue, original_symbol)
+            
+            # Get price if available
+            price = None
+            if venue_price_map and venue in venue_price_map:
+                price = venue_price_map[venue].get(original_symbol)
+            
+            if normalized not in symbol_venue_rates:
+                symbol_venue_rates[normalized] = []
+            
+            symbol_venue_rates[normalized].append({
+                "display_venue": display_venue,
+                "original_symbol": original_symbol,
+                "base_venue": venue,
+                "rate": rate,
+                "price": price,
+            })
+    
+    # Compute arbs for each normalized symbol
+    for normalized_symbol, venue_list in symbol_venue_rates.items():
+        if len(venue_list) < 2:
             continue
-
-        for i, (short_venue, short_rate) in enumerate(symbol_venues):
-            for j, (long_venue, long_rate) in enumerate(symbol_venues):
+        
+        for i, short_data in enumerate(venue_list):
+            for j, long_data in enumerate(venue_list):
                 if i == j:
                     continue
                 
-                spread = short_rate - long_rate
+                spread = short_data["rate"] - long_data["rate"]
                 if spread <= 0:
                     continue
-                    
+                
                 net_spread = spread - fee_buffer
                 if net_spread < min_spread:
                     continue
-
-                short_price = None
-                long_price = None
-                price_spread_pct = None
                 
-                if venue_price_map:
-                    short_price = venue_price_map.get(short_venue, {}).get(symbol)
-                    long_price = venue_price_map.get(long_venue, {}).get(symbol)
-                    
-                    if short_price and long_price:
-                        avg_price = (short_price + long_price) / 2
-                        price_spread_pct = abs(short_price - long_price) / avg_price
-
+                # Calculate price spread if both have prices
+                price_spread_pct = None
+                if short_data["price"] and long_data["price"]:
+                    avg_price = (short_data["price"] + long_data["price"]) / 2
+                    price_spread_pct = abs(short_data["price"] - long_data["price"]) / avg_price
+                
                 opportunities.append(
                     ArbOpportunity(
-                        symbol=symbol,
-                        short_venue=short_venue,
-                        short_funding=short_rate,
-                        long_venue=long_venue,
-                        long_funding=long_rate,
+                        symbol=normalized_symbol,
+                        short_venue=short_data["display_venue"],
+                        short_funding=short_data["rate"],
+                        long_venue=long_data["display_venue"],
+                        long_funding=long_data["rate"],
                         spread=spread,
                         net_spread=net_spread,
-                        short_price=short_price,
-                        long_price=long_price,
+                        short_price=short_data["price"],
+                        long_price=long_data["price"],
                         price_spread_pct=price_spread_pct,
                     )
                 )
-
+    
     return opportunities
-
-
-def compute_arbs(
-    symbols: list[str],
-    venue_funding_map: dict[str, dict[str, float]],
-    fee_buffer: float,
-) -> list[ArbOpportunity]:
-    opportunities = []
-    for symbol in symbols:
-        venue_rates: list[tuple[str, float]] = []
-        for venue, rates in venue_funding_map.items():
-            if symbol in rates:
-                venue_rates.append((venue, rates[symbol]))
-        if len(venue_rates) < 2:
-            continue
-        best_short = max(venue_rates, key=lambda x: x[1])
-        best_long = min(venue_rates, key=lambda x: x[1])
-        if best_short[0] == best_long[0]:
-            continue
-        spread = best_short[1] - best_long[1]
-        net_spread = spread - fee_buffer
-        opportunities.append(
-            ArbOpportunity(
-                symbol=symbol,
-                short_venue=best_short[0],
-                short_funding=best_short[1],
-                long_venue=best_long[0],
-                long_funding=best_long[1],
-                spread=spread,
-                net_spread=net_spread,
-            )
-        )
-    return opportunities
-
-
-def filter_by_min_spread(
-    opportunities: list[ArbOpportunity],
-    min_net_spread: float,
-) -> list[ArbOpportunity]:
-    return [opp for opp in opportunities if opp.net_spread >= min_net_spread]
-
-
-def make_cooldown_key(
-    symbol: str,
-    short_venue: str,
-    long_venue: str,
-    channel: str,
-) -> str:
-    return f"{symbol}:{short_venue}:{long_venue}:{channel}"
-
-
-def is_cooldown_passed(
-    last_triggered: datetime | None,
-    cooldown_seconds: int,
-    now: datetime | None = None,
-) -> bool:
-    if last_triggered is None:
-        return True
-    now = now or datetime.utcnow()
-    return (now - last_triggered) >= timedelta(seconds=cooldown_seconds)
 
 
 def format_funding_rate(rate: float) -> str:
@@ -203,6 +185,7 @@ def format_apr_compact(apr: float) -> str:
 
 
 def venue_abbrev(venue: str) -> str:
+    """Get abbreviated venue name, handling HIP-3 suffixes."""
     abbrevs = {
         "hyperliquid": "HL",
         "paradex": "PDX",
@@ -210,42 +193,14 @@ def venue_abbrev(venue: str) -> str:
         "extended": "EXT",
         "variational": "VAR",
     }
+    
+    # Handle HIP-3 venues like "hyperliquid_hyna"
+    if "_" in venue:
+        parts = venue.split("_", 1)
+        base_abbrev = abbrevs.get(parts[0].lower(), parts[0][:2].upper())
+        return f"{base_abbrev}-{parts[1]}"
+    
     return abbrevs.get(venue.lower(), venue[:3].upper())
-
-
-def format_telegram_message(
-    opp: ArbOpportunity,
-    interval_hours: float = 8,
-    spread_stats: dict = None,
-) -> str:
-    apr = estimate_apr(opp.spread, interval_hours)
-    daily_return = estimate_daily_return(opp.net_spread)
-    msg = (
-        f"🔔 <b>Funding Arb: {opp.symbol}</b>\n"
-        f"\n"
-        f"📉 <b>Short:</b> {opp.short_venue} @ {format_funding_rate(opp.short_funding)}\n"
-        f"📈 <b>Long:</b> {opp.long_venue} @ {format_funding_rate(opp.long_funding)}\n"
-        f"\n"
-        f"💰 <b>Spread:</b> {format_funding_rate(opp.spread)}\n"
-        f"💵 <b>Net Spread:</b> {format_funding_rate(opp.net_spread)}\n"
-        f"📊 <b>Est. APR:</b> {apr * 100:.1f}%\n"
-        f"💵 <b>$10k/day:</b> ${daily_return:.2f}"
-    )
-    if spread_stats:
-        trend_emoji = get_trend_emoji(spread_stats["trend"])
-        duration = format_duration(spread_stats["duration_hours"])
-        msg += (
-            f"\n\n"
-            f"📊 <b>Trend:</b> {spread_stats['trend'].capitalize()} {trend_emoji}\n"
-            f"⏱️ <b>Active:</b> {duration}\n"
-            f"📈 <b>24h Avg:</b> {format_funding_rate(spread_stats['avg_24h'])}"
-        )
-        if spread_stats["data_points"] >= 3:
-            msg += (
-                f"\n📉 <b>24h Range:</b> {format_funding_rate(spread_stats['min_24h'])} - "
-                f"{format_funding_rate(spread_stats['max_24h'])}"
-            )
-    return msg
 
 
 def format_exit_alert(
@@ -256,7 +211,6 @@ def format_exit_alert(
     previous_spread: float,
     duration_hours: float,
 ) -> str:
-    """Format exit alert for established position that's no longer profitable."""
     current_apr = estimate_apr(current_spread)
     previous_apr = estimate_apr(previous_spread)
     
@@ -290,7 +244,6 @@ class LeaderboardEntry:
 
 
 def format_leaderboard_entry(entry: LeaderboardEntry, rank: int = None) -> str:
-    """Format single entry in a clean, readable format."""
     opp = entry.opp
     apr = estimate_apr(opp.net_spread)
     apr_min = estimate_apr(entry.min_spread)
@@ -300,25 +253,20 @@ def format_leaderboard_entry(entry: LeaderboardEntry, rank: int = None) -> str:
     
     lines = []
     
-    # Direction line
     direction = f"📉{venue_abbrev(opp.short_venue)} → 📈{venue_abbrev(opp.long_venue)}"
     lines.append(direction)
     
-    # Current spread and APR
     lines.append(f"💰 {format_rate_compact(opp.net_spread)} ({format_apr_compact(apr)} APR)")
     
-    # APR range and average if we have enough data
     if entry.data_points >= 3:
         lines.append(f"📊 Avg: {format_apr_compact(apr_avg)} | Range: {format_apr_compact(apr_min)}-{format_apr_compact(apr_max)}")
     
-    # Price spread line
     if entry.price_spread_pct is not None:
         price_line = f"💱 Price Δ: {format_price_spread(entry.price_spread_pct)}"
         if entry.price_spread_avg is not None and entry.data_points >= 3:
             price_line += f" (avg: {format_price_spread(entry.price_spread_avg)})"
         lines.append(price_line)
     
-    # Duration and trend
     lines.append(f"⏱️ {format_duration(entry.duration_hours)} {trend_emoji}")
     
     return "\n".join(lines)
@@ -328,13 +276,11 @@ def format_leaderboard(
     established: dict[str, list[LeaderboardEntry]],
     emerging: dict[str, list[LeaderboardEntry]],
 ) -> str:
-    """Format full leaderboard message."""
     lines = []
     lines.append("📊 <b>FUNDING ARB LEADERBOARD</b>")
     lines.append(f"🕐 {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC")
     lines.append("")
     
-    # Established section
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("🏆 <b>ESTABLISHED</b>")
     lines.append("<i>≥48h active | ≥0.01% spread</i>")
@@ -361,7 +307,6 @@ def format_leaderboard(
     lines.append("")
     lines.append("")
     
-    # Emerging section
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("⚡ <b>EMERGING</b>")
     lines.append("<i>&lt;48h active | ≥0.02% spread</i>")
@@ -385,10 +330,10 @@ def format_leaderboard(
         lines.append("")
         lines.append("<i>No new opportunities detected</i>")
     
-    # Footer
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
     lines.append("<i>HL=Hyperliquid | PDX=Paradex | GV=GRVT</i>")
     lines.append("<i>EXT=Extended | VAR=Variational</i>")
+    lines.append("<i>HL-hyna/flx/km = HIP-3 dexs</i>")
     
     return "\n".join(lines)
